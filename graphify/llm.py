@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from graphify import attribution
 from graphify.file_slice import (
     FileSlice,
     bisect_slice,
@@ -1071,7 +1072,10 @@ def _call_openai_compat(
     result = _parse_llm_json(raw_content or "{}")
     result["input_tokens"] = resp.usage.prompt_tokens if resp.usage else 0
     result["output_tokens"] = resp.usage.completion_tokens if resp.usage else 0
-    result["model"] = model
+    # OpenAI-compatible responses echo the model that actually served the
+    # request, which is not always the one we asked for — a gateway or a
+    # provider-side alias can resolve elsewhere. Prefer what it says it served.
+    attribution.attach(result, model, getattr(resp, "model", None))
     # `finish_reason == "length"` means the model hit max_completion_tokens
     # mid-generation. The JSON we got back is truncated; callers should
     # treat this as a signal to retry with smaller input.
@@ -1127,7 +1131,9 @@ def _call_claude(api_key: str, model: str, user_message: str, max_tokens: int = 
     result = _parse_llm_json(raw_content or "{}")
     result["input_tokens"] = resp.usage.input_tokens if resp.usage else 0
     result["output_tokens"] = resp.usage.output_tokens if resp.usage else 0
-    result["model"] = model
+    # The Messages API returns the concrete model it served — an alias like
+    # `claude-sonnet-4-5` resolves to a dated id here. Prefer the resolved one.
+    attribution.attach(result, model, getattr(resp, "model", None))
     # Normalise Anthropic's `stop_reason` to the OpenAI-compat `finish_reason`
     # vocabulary so the adaptive-retry layer doesn't have to know which
     # backend produced the result.
@@ -1289,8 +1295,24 @@ def _call_claude_cli(user_message: str, max_tokens: int = 8192, *, deep_mode: bo
         + int(usage.get("cache_creation_input_tokens", 0) or 0)
     )
     result["output_tokens"] = int(usage.get("output_tokens", 0) or 0)
+    # Claude Code's envelope reports `modelUsage` keyed by the model ids it
+    # actually served — the most authoritative attribution available on any
+    # path here, because nothing was requested by id in the first place. A
+    # session that switched models (fallback, or a long run crossing a limit)
+    # keys more than one, so record all of them rather than the first.
     model_usage = envelope.get("modelUsage") or {}
-    result["model"] = next(iter(model_usage), "claude-code-plan")
+    served = [m for m in model_usage if attribution.record(m, attribution.REPORTED)]
+    if served:
+        result[attribution.KEY] = attribution.normalize(
+            [attribution.record(m, attribution.REPORTED) for m in served]
+        )
+        result["model"] = served[0]
+        result["model_source"] = attribution.REPORTED
+    else:
+        # No envelope attribution. "claude-code-plan" is a placeholder standing
+        # in for "whatever the user's plan resolved to", not a model id — so it
+        # is recorded as requested, never as something the provider confirmed.
+        attribution.attach(result, "claude-code-plan")
     stop_reason = envelope.get("stop_reason", "")
     result["finish_reason"] = "length" if stop_reason == "max_tokens" else "stop"
     if _response_is_hollow(raw_content, result) and result["finish_reason"] != "length":
@@ -1354,7 +1376,9 @@ def _call_azure(
     result = _parse_llm_json(raw_content or "{}")
     result["input_tokens"] = resp.usage.prompt_tokens if resp.usage else 0
     result["output_tokens"] = resp.usage.completion_tokens if resp.usage else 0
-    result["model"] = model
+    # Azure `model` here is a deployment name on the way in, but the response
+    # echoes the underlying model that served it. Prefer the response.
+    attribution.attach(result, model, getattr(resp, "model", None))
     result["finish_reason"] = resp.choices[0].finish_reason
     if _response_is_hollow(raw_content, result) and result["finish_reason"] != "length":
         print(
@@ -1398,7 +1422,10 @@ def _call_bedrock(model: str, user_message: str, max_tokens: int = 8192, *, deep
     usage = resp.get("usage", {})
     result["input_tokens"] = usage.get("inputTokens", 0)
     result["output_tokens"] = usage.get("outputTokens", 0)
-    result["model"] = model
+    # Bedrock's `converse` response carries no model id, so the requested
+    # modelId is the best available — and is marked as such rather than being
+    # passed off as confirmed.
+    attribution.attach(result, model)
     result["finish_reason"] = "length" if resp.get("stopReason") == "max_tokens" else "stop"
     if _response_is_hollow(text, result) and result["finish_reason"] != "length":
         print(
@@ -1693,6 +1720,10 @@ def _extract_with_adaptive_retry(
             "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
             "input_tokens": left.get("input_tokens", 0) + right.get("input_tokens", 0),
             "output_tokens": left.get("output_tokens", 0) + right.get("output_tokens", 0),
+            # Each half was answered independently and may have been served by a
+            # different model than the other, or than the one requested. Union
+            # what they reported rather than relabelling both as `model`.
+            attribution.KEY: attribution.merge(left, right),
             "model": model,
             "finish_reason": "stop",
         }
@@ -1725,14 +1756,22 @@ def _extract_with_adaptive_retry(
                 f"and cannot be split further: {exc}",
                 file=sys.stderr,
             )
-            return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop"}
+            # Nothing was extracted, so nothing is attributable: an empty
+            # `models` keeps a model that asserted no edges out of the run's
+            # attribution set, which `model` alone would otherwise imply.
+            return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0,
+                    attribution.KEY: [], "model": model, "finish_reason": "stop"}
         if _depth >= max_depth:
             print(
                 f"[graphify] chunk of {len(chunk)} still overflows context at "
                 f"recursion depth {_depth} (max {max_depth}) — dropping",
                 file=sys.stderr,
             )
-            return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0, "model": model, "finish_reason": "stop"}
+            # Nothing was extracted, so nothing is attributable: an empty
+            # `models` keeps a model that asserted no edges out of the run's
+            # attribution set, which `model` alone would otherwise imply.
+            return {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0,
+                    attribution.KEY: [], "model": model, "finish_reason": "stop"}
         print(
             f"[graphify] chunk of {len(chunk)} exceeded context at depth "
             f"{_depth} ({type(exc).__name__}); splitting in half and retrying",
@@ -1751,6 +1790,7 @@ def _extract_with_adaptive_retry(
             "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
             "input_tokens": left.get("input_tokens", 0) + right.get("input_tokens", 0),
             "output_tokens": left.get("output_tokens", 0) + right.get("output_tokens", 0),
+            attribution.KEY: attribution.merge(left, right),
             "model": model,
             "finish_reason": "stop",
         }
@@ -1802,6 +1842,9 @@ def _extract_with_adaptive_retry(
         "hyperedges": left.get("hyperedges", []) + right.get("hyperedges", []),
         "input_tokens": left.get("input_tokens", 0) + right.get("input_tokens", 0),
         "output_tokens": left.get("output_tokens", 0) + right.get("output_tokens", 0),
+        # The truncated first attempt is discarded, but the two halves that
+        # replaced it each carry their own attribution — keep both.
+        attribution.KEY: attribution.merge(left, right),
         "model": result.get("model"),
         # Both halves either succeeded or have already surfaced their own
         # truncation warning; the merged result is no longer truncated as a
@@ -1874,6 +1917,9 @@ def extract_corpus_parallel(
         "nodes": [], "edges": [], "hyperedges": [],
         "input_tokens": 0, "output_tokens": 0,
         "failed_chunks": 0,  # count of chunks that raised — loud failure on chunk errors
+        # The set of models that answered, accumulated across chunks. Empty
+        # means unknown, which is what a run with no successful chunk reports.
+        attribution.KEY: [],
     }
     total = len(chunks)
 
@@ -1986,6 +2032,17 @@ def _merge_into(merged: dict, result: dict) -> None:
     merged["hyperedges"].extend(result.get("hyperedges", []))
     merged["input_tokens"] += result.get("input_tokens", 0)
     merged["output_tokens"] += result.get("output_tokens", 0)
+    # Union, not overwrite. Chunks can be answered by different models — a
+    # mid-run fallback, a resumed run, a config change — and labelling the
+    # whole graph with whichever chunk happened to land first would misreport
+    # every other chunk's judgment. Fail-open: never let attribution bookkeeping
+    # lose a chunk's nodes and edges.
+    try:
+        merged[attribution.KEY] = attribution.merge_into(
+            merged.get(attribution.KEY), result
+        )
+    except Exception:  # noqa: BLE001 — attribution must never break a build
+        pass
 
 
 def _call_llm(

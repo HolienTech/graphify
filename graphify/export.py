@@ -13,6 +13,7 @@ from datetime import date
 from pathlib import Path
 import networkx as nx
 from networkx.readwrite import json_graph
+from graphify import attribution
 from graphify.security import sanitize_label
 from graphify.analyze import _node_community_map
 from graphify.build import edge_data
@@ -180,7 +181,15 @@ def _git_head() -> str | None:
         return None
 
 
-def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *, force: bool = False, built_at_commit: str | None = None, community_labels: dict[int, str] | None = None) -> bool:
+def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *, force: bool = False, built_at_commit: str | None = None, community_labels: dict[int, str] | None = None, models: list | None = None) -> bool:
+    """Write `graph.json`.
+
+    `models` records which model(s) produced the semantic pass, as
+    `{"model": ..., "source": "reported"|"requested"}` records. It is omitted
+    from the output when empty — a graph with no semantic pass, or one built
+    before attribution was recorded, has no model to name, and an absent field
+    reads as "unknown" rather than as a default.
+    """
     # Safety check: refuse to silently shrink an existing graph (#479)
     existing_path = Path(output_path)
     if not force and existing_path.exists():
@@ -266,6 +275,14 @@ def to_json(G: nx.Graph, communities: dict[int, list[str]], output_path: str, *,
     commit = built_at_commit if built_at_commit is not None else _git_head()
     if commit:
         data["built_at_commit"] = commit
+    # Which model asserted these edges. Fail-open: a graph that exports without
+    # a model label is far better than an export that dies computing one.
+    try:
+        recorded = attribution.normalize(models)
+        if recorded:
+            data[attribution.KEY] = recorded
+    except Exception:  # noqa: BLE001 — attribution must never break an export
+        pass
     with open(output_path, "w", encoding="utf-8") as f:  # nosec
         json.dump(data, f, indent=2)
     return True

@@ -4,12 +4,36 @@ import re
 from datetime import date
 import networkx as nx
 
+from graphify import attribution
+
 
 def _safe_community_name(label: str) -> str:
     """Mirrors export.safe_name so community hub filenames and report wikilinks always agree."""
     cleaned = re.sub(r'[\\/*?:"<>|#^[\]]', "", label.replace("\r\n", " ").replace("\r", " ").replace("\n", " ")).strip()
     cleaned = re.sub(r"\.(md|mdx|markdown)$", "", cleaned, flags=re.IGNORECASE)
     return cleaned or "unnamed"
+
+
+def _semantic_model_line(models) -> str:
+    """The report's one-line answer to "which model asserted these edges?".
+
+    Always emitted, including when nothing was recorded — "unknown" stated
+    plainly is the point. A silently missing line would let a reader assume the
+    default model, which is the assumption this exists to prevent.
+
+    Fail-open: any problem rendering attribution degrades to "unknown" rather
+    than taking the report down with it.
+    """
+    try:
+        label = attribution.format_models(models)
+        if attribution.is_mixed(models):
+            return (
+                f"- Semantic model: {label} — mixed run; these edges are not all "
+                f"one model's judgment"
+            )
+        return f"- Semantic model: {label}"
+    except Exception:  # noqa: BLE001 — a report without a model beats no report
+        return f"- Semantic model: {attribution.UNKNOWN}"
 
 
 def load_learning_for_report(graph_path) -> dict | None:
@@ -83,6 +107,7 @@ def generate(
     built_at_commit: str | None = None,
     learning: dict | None = None,
     obsidian: bool = False,
+    models: list | None = None,
 ) -> str:
     today = date.today().isoformat()
 
@@ -130,6 +155,7 @@ def generate(
         f"- Extraction: {ext_pct}% EXTRACTED · {inf_pct}% INFERRED · {amb_pct}% AMBIGUOUS"
         + (f" · INFERRED: {len(inf_edges)} edges (avg confidence: {inf_avg})" if inf_avg is not None else ""),
         f"- Token cost: {token_cost.get('input', 0):,} input · {token_cost.get('output', 0):,} output",
+        _semantic_model_line(models),
     ]
 
     if built_at_commit:

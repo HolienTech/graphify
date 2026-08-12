@@ -346,6 +346,7 @@ from graphify.semantic_cleanup import load_validated_semantic_fragment, sanitize
 
 chunks = sorted(glob.glob('graphify-out/.graphify_chunk_*.json'))
 all_nodes, all_edges, all_hyperedges = [], [], []
+all_models = []
 total_in, total_out = 0, 0
 for c in chunks:
     d, errors = load_validated_semantic_fragment(Path(c))
@@ -358,9 +359,13 @@ for c in chunks:
     all_hyperedges += d.get('hyperedges', [])
     total_in += d.get('input_tokens', 0)
     total_out += d.get('output_tokens', 0)
+    for _m in d.get('models', []):
+        if _m not in all_models:
+            all_models.append(_m)
 Path('graphify-out/.graphify_semantic_new.json').write_text(json.dumps({
     'nodes': all_nodes, 'edges': all_edges, 'hyperedges': all_hyperedges,
     'input_tokens': total_in, 'output_tokens': total_out,
+    'models': all_models,
 }, indent=2))
 print(f'Merged {len(chunks)} chunks: {total_in:,} in / {total_out:,} out tokens')
 "
@@ -404,6 +409,7 @@ merged = {
     'edges': all_edges,
     'hyperedges': all_hyperedges,
     'input_tokens': new.get('input_tokens', 0),
+    'models': new.get('models', []),
     'output_tokens': new.get('output_tokens', 0),
 }
 merged = sanitize_semantic_fragment(merged)
@@ -439,6 +445,7 @@ merged = {
     'edges': merged_edges,
     'hyperedges': merged_hyperedges,
     'input_tokens': sem.get('input_tokens', 0),
+    'models': sem.get('models', []),
     'output_tokens': sem.get('output_tokens', 0),
 }
 merged = sanitize_semantic_fragment(merged)
@@ -812,6 +819,7 @@ cost['runs'].append({
     'input_tokens': input_tok,
     'output_tokens': output_tok,
     'files': detect.get('total_files', 0),
+    'models': extract.get('models', []),
 })
 cost['total_input_tokens'] += input_tok
 cost['total_output_tokens'] += output_tok
