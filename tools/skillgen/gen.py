@@ -902,6 +902,25 @@ def _is_uv_from_interpreter_fix_line(line: str) -> bool:
     return "uv tool run" in line and "graphifyy python" in line
 
 
+def _is_model_attribution_line(line: str) -> bool:
+    """Whether a line is part of the model-attribution passthrough.
+
+    The artifact chain (chunks -> semantic -> extract -> cost.json) now forwards
+    a ``models`` list so a run records which model produced its semantic pass,
+    and a run that mixed models records the whole set rather than the first.
+    Every hop defaults to ``[]``, which reads as "unknown" — so this is purely
+    additive metadata and changes no extraction behaviour.
+    """
+    stripped = line.strip()
+    return (
+        stripped == "all_models = []"
+        or stripped.startswith("'models':")
+        or stripped.startswith("for _m in d.get('models'")
+        or stripped.startswith("if _m not in all_models")
+        or stripped.startswith("all_models.append(_m)")
+    )
+
+
 # Every line that may differ between a rendered monolith and its pristine v8
 # baseline. Each predicate documents one sanctioned change-class; a blank line is
 # allowed because the multi-line fix blocks insert spacing. Anything else failing
@@ -919,6 +938,7 @@ _SANCTIONED_MONOLITH_DIFFS = (
     _is_shebang_allowlist_fix_line,
     _is_obsidian_usage_comment_line,
     _is_uv_from_interpreter_fix_line,
+    _is_model_attribution_line,
 )
 
 

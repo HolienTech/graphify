@@ -616,8 +616,15 @@ def triage_with_opus(prs: list[PRInfo], base: str) -> None:
         sys.exit(1)
 
     print()
-    print(bold("  Triage") + dim(f" ({backend} / {model})"))
+    # What we ASKED for. The model that actually answers is printed after the
+    # stream, from the provider's own response — a requested id is not evidence
+    # of what served the request, and a silent fallback looks identical here.
+    print(bold("  Triage") + dim(f" ({backend} / requested: {model})"))
     print()
+
+    # Filled in from the provider response below; stays empty when the provider
+    # does not say, in which case the requested id is reported as such.
+    served: list[str] = []
 
     try:
         if backend == "claude":
@@ -630,6 +637,14 @@ def triage_with_opus(prs: list[PRInfo], base: str) -> None:
                 print("  ", end="", flush=True)
                 for text in stream.text_stream:
                     print(text.replace("\n", "\n  "), end="", flush=True)
+                # The final message carries the concrete model that served this
+                # request, which an alias like `claude-sonnet-4-5` resolves to.
+                try:
+                    final = stream.get_final_message()
+                    if getattr(final, "model", None):
+                        served.append(final.model)
+                except Exception:  # noqa: BLE001 — attribution is not worth failing triage
+                    pass
             print("\n")
 
         elif backend in ("kimi", "openai", "gemini", "ollama"):
@@ -643,6 +658,11 @@ def triage_with_opus(prs: list[PRInfo], base: str) -> None:
             ) as stream:
                 print("  ", end="", flush=True)
                 for chunk in stream:
+                    # Every chunk echoes the model that served it. A gateway can
+                    # resolve the requested id elsewhere, so take it from here.
+                    chunk_model = getattr(chunk, "model", None)
+                    if chunk_model and chunk_model not in served:
+                        served.append(chunk_model)
                     delta = chunk.choices[0].delta.content if chunk.choices else None
                     if delta:
                         print(delta.replace("\n", "\n  "), end="", flush=True)
@@ -664,12 +684,32 @@ def triage_with_opus(prs: list[PRInfo], base: str) -> None:
                     result = json.loads(proc.stdout).get("result") or proc.stdout
                 except json.JSONDecodeError:
                     result = proc.stdout
+                # Claude Code's envelope names the models it actually served
+                # under `modelUsage` — the most authoritative signal available.
+                try:
+                    from graphify.llm import _claude_cli_envelope
+                    served.extend(_claude_cli_envelope(proc.stdout).get("modelUsage") or {})
+                except Exception:  # noqa: BLE001
+                    pass
                 for line in result.splitlines():
                     print(f"  {line}")
                 print()
 
     except Exception as e:
         print(f"\n\n  {red(f'Triage failed: {e}')}", file=sys.stderr)
+
+    # After the fact: who actually answered. When the provider told us, that is
+    # what is shown and it is marked `reported`; when it did not, the requested
+    # id is shown and marked `requested` so the two are never confused.
+    try:
+        from graphify import attribution as _attr
+        if served:
+            records = _attr.merge([_attr.record(m, _attr.REPORTED) for m in served])
+        else:
+            records = _attr.merge([_attr.record(model, _attr.REQUESTED)])
+        print(dim(f"  answered by: {_attr.format_models(records)}"))
+    except Exception:  # noqa: BLE001 — never let the label break triage output
+        pass
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

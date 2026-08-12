@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from graphify import attribution as _attribution
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 from pathlib import Path
 
@@ -48,6 +49,21 @@ _GEMINI_NUDGE_TEXT = (
     'GRAPH_REPORT.md) instead of grepping raw files. Read GRAPH_REPORT.md only '
     'for broad architecture context.'
 )
+
+
+def _print_semantic_model(models) -> None:
+    """Say which model produced the semantic pass, right after the token line.
+
+    Printed even when nothing was recorded: "unknown" stated out loud is the
+    point, because the alternative is a reader assuming the configured default.
+    Never raises — a missing label must not take a build down with it.
+    """
+    try:
+        label = _attribution.format_models(models)
+        suffix = " (mixed run)" if _attribution.is_mixed(models) else ""
+        print(f"[graphify extract] semantic model: {label}{suffix}")
+    except Exception:  # noqa: BLE001 — attribution is never worth a failed build
+        pass
 
 
 def _default_graph_path() -> str:
@@ -1173,11 +1189,21 @@ def dispatch_command(cmd: str) -> None:
         from graphify.export import _git_head as _gh
         _commit = _gh()
         from graphify.report import load_learning_for_report as _llfr
+        # cluster-only re-exports an existing graph without running a semantic
+        # pass of its own, so it must carry forward the attribution already on
+        # disk. Re-exporting without it would quietly erase the record of which
+        # model asserted these edges.
+        try:
+            _models = _attribution.from_artifact(
+                json.loads((out / "graph.json").read_text(encoding="utf-8"))
+            )
+        except Exception:  # noqa: BLE001 — no readable prior graph: unknown, not a crash
+            _models = []
         report = generate(G, communities, cohesion, labels, gods, surprises,
                           {"warning": "cluster-only mode — file stats not available"},
                           tokens, str(watch_path), suggested_questions=questions,
                           min_community_size=min_community_size, built_at_commit=_commit,
-                          learning=_llfr(out / "graph.json"))
+                          learning=_llfr(out / "graph.json"), models=_models)
         (out / "GRAPH_REPORT.md").write_text(report, encoding="utf-8")
         stages.mark("report")
         from graphify.export import backup_if_protected as _backup
@@ -1193,7 +1219,8 @@ def dispatch_command(cmd: str) -> None:
             json.dumps(analysis, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        to_json(G, communities, str(out / "graph.json"), community_labels=labels)
+        to_json(G, communities, str(out / "graph.json"), community_labels=labels,
+                models=_models)
         labels_path.write_text(json.dumps({str(k): v for k, v in labels.items()}, ensure_ascii=False), encoding="utf-8")
         # Membership signatures beside the labels so a later cluster-only can detect
         # which communities changed and avoid reusing a stale label (see reuse above).
@@ -2270,6 +2297,11 @@ def dispatch_command(cmd: str) -> None:
         sem_result: dict = {
             "nodes": [], "edges": [], "hyperedges": [],
             "input_tokens": 0, "output_tokens": 0,
+            # Models that answered this run's fresh chunks. Content served from
+            # the semantic cache contributes nothing here — the cache records no
+            # model — so prior attribution is recovered from the existing
+            # graph.json below instead of being invented.
+            _attribution.KEY: [],
         }
         sem_cache_hits = 0
         sem_cache_misses = 0
@@ -2328,6 +2360,9 @@ def dispatch_command(cmd: str) -> None:
                         file=sys.stderr,
                     )
                     fresh = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 0, "output_tokens": 0}
+                    # Extraction blew up entirely, so no model produced
+                    # anything — attribution stays empty, i.e. unknown.
+                    fresh[_attribution.KEY] = []
 
                 # on_chunk_done only fires after a chunk succeeds. If fresh
                 # semantic extraction was requested and no chunks completed,
@@ -2355,6 +2390,12 @@ def dispatch_command(cmd: str) -> None:
                 sem_result["hyperedges"].extend(fresh.get("hyperedges", []))
                 sem_result["input_tokens"] += fresh.get("input_tokens", 0)
                 sem_result["output_tokens"] += fresh.get("output_tokens", 0)
+                try:
+                    sem_result[_attribution.KEY] = _attribution.merge_into(
+                        sem_result.get(_attribution.KEY), fresh
+                    )
+                except Exception:  # noqa: BLE001 — never fail a build over a label
+                    pass
 
         # Prune orphaned semantic cache entries. The semantic cache is
         # content-hash-keyed and unversioned, so it is never swept by the AST
@@ -2421,6 +2462,28 @@ def dispatch_command(cmd: str) -> None:
 
         graph_json_path = graphify_out / "graph.json"
         analysis_path = graphify_out / ".graphify_analysis.json"
+
+        # Which model(s) asserted the semantic edges in this graph.
+        #
+        # An incremental rebuild reuses cached semantic content that an earlier
+        # run's model produced, and the cache records no model. So the honest
+        # set is what this run's fresh chunks reported UNIONED with whatever the
+        # graph we are about to overwrite already recorded — dropping the latter
+        # would relabel edges that a different model actually asserted.
+        # Fail-open throughout: attribution never blocks a build.
+        try:
+            _prior_models = _attribution.from_artifact(
+                json.loads(graph_json_path.read_text(encoding="utf-8"))
+                if graph_json_path.exists() else {}
+            )
+        except Exception:  # noqa: BLE001 — unreadable/corrupt prior graph: no prior claim
+            _prior_models = []
+        try:
+            merged[_attribution.KEY] = _attribution.merge(
+                _prior_models, sem_result.get(_attribution.KEY)
+            )
+        except Exception:  # noqa: BLE001
+            merged[_attribution.KEY] = []
 
         # Build a manifest-safe files dict: only stamp semantic_hash for files
         # that actually produced output (cache hit or fresh extraction). Files
@@ -2498,6 +2561,7 @@ def dispatch_command(cmd: str) -> None:
                     f"{merged['output_tokens']:,} out, "
                     f"est. cost: ${cost:.4f}"
                 )
+            _print_semantic_model(merged.get(_attribution.KEY))
             try:
                 _save_manifest(_manifest_files, manifest_path=str(manifest_path), kind="both", root=target)
             except Exception as exc:
@@ -2563,7 +2627,8 @@ def dispatch_command(cmd: str) -> None:
 
         from graphify.export import backup_if_protected as _backup
         _backup(graphify_out)
-        _to_json(G, communities, str(graph_json_path), force=True)
+        _to_json(G, communities, str(graph_json_path), force=True,
+                 models=merged.get(_attribution.KEY))
         stages.mark("export")
         if merged.get("output_tokens", 0) > 0:
             (graphify_out / ".graphify_semantic_marker").write_text(
@@ -2590,6 +2655,9 @@ def dispatch_command(cmd: str) -> None:
                 "input": merged["input_tokens"],
                 "output": merged["output_tokens"],
             },
+            # Carried in the sidecar too so the report can name the model
+            # without re-reading (and re-parsing) the whole graph.
+            _attribution.KEY: merged.get(_attribution.KEY) or [],
         }
         analysis_path.write_text(json.dumps(analysis, indent=2), encoding="utf-8")
         try:
@@ -2620,6 +2688,7 @@ def dispatch_command(cmd: str) -> None:
                 f"{merged['output_tokens']:,} out, "
                 f"est. cost (~{backend}): ${cost:.4f}"
             )
+        _print_semantic_model(merged.get(_attribution.KEY))
         # extract intentionally stops at graph.json + analysis; the report and
         # community labels are produced by `cluster-only` (or an agent's Step 5).
         # Point standalone users at it so communities get named (#1097).

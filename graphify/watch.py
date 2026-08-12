@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 # Single source of truth in graphify.paths (#1423); re-exported as _GRAPHIFY_OUT.
+from graphify import attribution as _attribution
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 _PENDING_FILENAME = ".pending_changes"
 _PENDING_DRAIN_MAX_PASSES = 20
@@ -888,6 +889,15 @@ def _rebuild_code(
         )
 
         _relativize_source_files(result, project_root, scope=watch_root)
+        # `update`/`watch` rebuild the AST side and reuse the existing graph's
+        # semantic nodes — so the model that asserted those edges is still the
+        # model of record. Carry its attribution forward; re-exporting without
+        # it would erase the answer to "which model asserted this?" on every
+        # file save. Fail-open: an unreadable prior graph just means unknown.
+        try:
+            _models = _attribution.from_artifact(existing_graph_data)
+        except Exception:  # noqa: BLE001 — never fail a rebuild over a label
+            _models = []
         # Source files re-extracted this run — their symbol sets may legitimately
         # shrink (a removed function), so the shrink-guard should not block the
         # write when every lost node belongs to one of them (or a deleted file).
@@ -913,6 +923,12 @@ def _rebuild_code(
                 "nodes": _dedupe_nodes(result.get("nodes", [])),
                 "links": _dedupe_edges(result.get("edges", [])),
             }
+            # Same reasoning as the clustered path: this rebuild reuses the
+            # prior graph's semantic nodes, so it inherits their attribution.
+            # Omitted when there is none, so an old graph stays byte-identical
+            # and no spurious rewrite is triggered.
+            if _models:
+                candidate_graph_data[_attribution.KEY] = _models
             candidate_graph_text = _json_text(candidate_graph_data)
             same_graph = False
             if existing_graph.exists():
@@ -1012,11 +1028,13 @@ def _rebuild_code(
         from graphify.report import load_learning_for_report as _llfr
         report = generate(G, communities, cohesion, labels, gods, surprises, detection,
                           {"input": 0, "output": 0}, report_root, suggested_questions=questions,
-                          built_at_commit=commit, learning=_llfr(out / "graph.json"))
+                          built_at_commit=commit, learning=_llfr(out / "graph.json"),
+                          models=_models)
         report_path = out / "GRAPH_REPORT.md"
         labels_json = json.dumps({str(k): v for k, v in sorted(labels.items())}, ensure_ascii=False, indent=2) + "\n"
         graph_tmp = out / ".graph.tmp.json"
-        json_written = to_json(G, communities, str(graph_tmp), force=True, built_at_commit=commit)
+        json_written = to_json(G, communities, str(graph_tmp), force=True, built_at_commit=commit,
+                               models=_models)
         if not json_written:
             return False
         candidate_graph_data = json.loads(graph_tmp.read_text(encoding="utf-8"))
