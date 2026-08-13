@@ -632,7 +632,7 @@ def triage_with_opus(prs: list[PRInfo], base: str) -> None:
                     print(text.replace("\n", "\n  "), end="", flush=True)
             print("\n")
 
-        elif backend in ("kimi", "openai", "gemini", "ollama"):
+        elif backend in ("kimi", "openai", "gemini", "ollama", "ollama-cloud"):
             from openai import OpenAI
             cfg = BACKENDS[backend]
             api_key = _get_backend_api_key(backend) or "ollama"

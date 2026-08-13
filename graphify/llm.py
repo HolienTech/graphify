@@ -90,6 +90,31 @@ BACKENDS: dict[str, dict] = {
         "temperature": 0,
         "max_tokens": 16384,
     },
+    "ollama-cloud": {
+        # Ollama Cloud — Ollama's hosted inference, OpenAI-compatible. Kept as a
+        # SEPARATE backend from "ollama" rather than an OLLAMA_BASE_URL override
+        # so it opts out of every local-Ollama special case: the num_ctx
+        # auto-derive (sized for a single local GPU), the serialized-call
+        # fallback, the retry bump, the GRAPHIFY_OLLAMA_VISION opt-in, and the
+        # non-loopback corpus-egress warning — none of which apply to a hosted
+        # endpoint you deliberately chose.
+        # Default model is Google's open-weight gemma4 (multimodal, 256k ctx on
+        # the 31b tag). NOTE: Ollama Cloud does NOT serve Gemini — Gemini is
+        # closed-weight; gemma4 is the Google model available there.
+        "base_url": os.environ.get("OLLAMA_CLOUD_BASE_URL", "https://ollama.com/v1"),
+        "default_model": "gemma4:cloud",
+        # Ollama's own docs tell you to set OLLAMA_API_KEY, so accept it too —
+        # but detect_backend() refuses to auto-select this backend when
+        # OLLAMA_BASE_URL points at loopback (see there).
+        "env_keys": ["OLLAMA_CLOUD_API_KEY", "OLLAMA_API_KEY"],
+        "model_env_key": "GRAPHIFY_OLLAMA_CLOUD_MODEL",
+        # Included in the plan's usage allowance rather than metered per token,
+        # so per-token pricing does not apply; `graphify cost` reports $0.
+        "pricing": {"input": 0.0, "output": 0.0},
+        "temperature": 0,
+        "max_tokens": 16384,
+        "vision": True,
+    },
     "gemini": {
         # GEMINI_BASE_URL points the backend at any OpenAI-compatible server for
         # Gemini models (LiteLLM, self-hosted proxy, ...). Falls back to Google's
@@ -1436,8 +1461,8 @@ def extract_files_direct(
         backend = detect_backend()
         if backend is None:
             raise ValueError(
-                "No LLM backend configured. Set one of: GEMINI_API_KEY, ANTHROPIC_API_KEY, "
-                "OPENAI_API_KEY, DEEPSEEK_API_KEY, MOONSHOT_API_KEY, "
+                "No LLM backend configured. Set one of: OLLAMA_CLOUD_API_KEY, GEMINI_API_KEY, "
+                "ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, MOONSHOT_API_KEY, "
                 "AZURE_OPENAI_API_KEY+AZURE_OPENAI_ENDPOINT, OLLAMA_BASE_URL, "
                 "or AWS credentials. Pass backend= explicitly to select a provider."
             )
@@ -2251,18 +2276,54 @@ def _validate_ollama_base_url(url: str, *, warn: bool = True) -> None:
         )
 
 
+def _ollama_base_url_is_loopback() -> bool:
+    """True if OLLAMA_BASE_URL is set and points at the local machine.
+
+    Used by detect_backend() to tell "I have an Ollama key lying around" apart
+    from "I deliberately run Ollama locally and want my corpus to stay here".
+    An unset OLLAMA_BASE_URL is not loopback: it expresses no preference.
+    """
+    url = os.environ.get("OLLAMA_BASE_URL", "").strip()
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in ("localhost", "::1") or host.startswith("127.")
+
+
 def detect_backend() -> str | None:
     """Return the name of whichever backend has an API key set, or None.
 
-    Priority: gemini → kimi → claude → openai → deepseek → azure → bedrock → ollama (last, opt-in).
+    Priority: ollama-cloud → kimi → claude → openai → deepseek → gemini →
+    azure → bedrock → ollama (last, opt-in).
 
-    Ollama is intentionally checked LAST so a paid API key (Anthropic/OpenAI/etc.)
-    is never silently shadowed by an incidental OLLAMA_BASE_URL in the environment
-    — see security finding F-002/F-029. Setting OLLAMA_BASE_URL alongside a paid
-    key now keeps you on the paid backend; remove the paid key (or pass
-    --backend ollama explicitly) to route to the local model.
+    ollama-cloud is checked FIRST because it is covered by the plan's usage
+    allowance rather than metered per token: when it is configured, letting a
+    metered backend win would bill the user for work they already paid for.
+    Gemini sat first here while it had a free tier; it is now metered like any
+    other paid backend, so it moved to the end of the keyed chain — a stray
+    GEMINI_API_KEY no longer silently shadows a cheaper or free option. It is
+    still auto-detected when it is the only key set, and --backend gemini is
+    unaffected.
+
+    Ollama (local) is intentionally checked LAST so a paid API key
+    (Anthropic/OpenAI/etc.) is never silently shadowed by an incidental
+    OLLAMA_BASE_URL in the environment — see security finding F-002/F-029.
+    Setting OLLAMA_BASE_URL alongside a paid key now keeps you on the paid
+    backend; remove the paid key (or pass --backend ollama explicitly) to route
+    to the local model.
     """
-    for backend in ("gemini", "kimi", "claude", "openai", "deepseek"):
+    # OLLAMA_API_KEY is accepted by ollama-cloud, but a user pointing
+    # OLLAMA_BASE_URL at loopback has said they want extraction to stay on the
+    # machine. Auto-routing them to a hosted endpoint on a leftover key would
+    # ship the whole corpus off-box — the same silent-egress class as F-002, in
+    # the opposite direction. Require an explicit --backend ollama-cloud there.
+    if _get_backend_api_key("ollama-cloud") and not _ollama_base_url_is_loopback():
+        return "ollama-cloud"
+    for backend in ("kimi", "claude", "openai", "deepseek", "gemini"):
         if _get_backend_api_key(backend):
             return backend
     if _get_backend_api_key("azure") and os.environ.get("AZURE_OPENAI_ENDPOINT"):
@@ -2274,7 +2335,7 @@ def detect_backend() -> str | None:
         _validate_ollama_base_url(ollama_url)
         return "ollama"
     for name in BACKENDS:
-        if name not in ("gemini", "kimi", "claude", "openai", "deepseek", "azure", "bedrock", "ollama", "claude-cli"):
+        if name not in ("gemini", "kimi", "claude", "openai", "deepseek", "azure", "bedrock", "ollama", "ollama-cloud", "claude-cli"):
             if _get_backend_api_key(name):
                 return name
     return None

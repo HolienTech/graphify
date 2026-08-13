@@ -18,6 +18,17 @@ def _clear_backend_env(monkeypatch):
         "DEEPSEEK_API_KEY",
         "AZURE_OPENAI_API_KEY",
         "AZURE_OPENAI_ENDPOINT",
+        "OLLAMA_CLOUD_API_KEY",
+        "OLLAMA_API_KEY",
+        "OLLAMA_BASE_URL",
+        # Model overrides leak from the developer's own shell and silently
+        # change which model a routing assertion sees, so clear them too.
+        "GRAPHIFY_GEMINI_MODEL",
+        "GRAPHIFY_OPENAI_MODEL",
+        "GRAPHIFY_DEEPSEEK_MODEL",
+        "GRAPHIFY_AZURE_MODEL",
+        "GRAPHIFY_BEDROCK_MODEL",
+        "GRAPHIFY_OLLAMA_CLOUD_MODEL",
     ):
         monkeypatch.delenv(env_key, raising=False)
 
@@ -38,14 +49,98 @@ def test_gemini_accepts_google_api_key(monkeypatch):
     assert llm._get_backend_api_key("gemini") == "google-key"
 
 
-def test_backend_detection_prefers_gemini(monkeypatch):
+def test_backend_detection_no_longer_prefers_gemini(monkeypatch):
+    """Gemini lost its free tier, so it must not shadow other paid backends.
+
+    It sat first in the priority chain while it was the free option. Now it is
+    metered like the rest, and a stray GEMINI_API_KEY silently outranking a
+    backend the user actually configured is a surprise bill, not a convenience.
+    """
     _clear_backend_env(monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     monkeypatch.setenv("MOONSHOT_API_KEY", "moonshot-key")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
 
-    assert llm.detect_backend() == "gemini"
+    assert llm.detect_backend() == "kimi"
+
+
+def test_ollama_cloud_outranks_metered_backends(monkeypatch):
+    """Plan-covered inference wins over per-token billing when both are set."""
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
+    monkeypatch.setenv("OLLAMA_CLOUD_API_KEY", "cloud-key")
+
+    assert llm.detect_backend() == "ollama-cloud"
+
+
+def test_ollama_cloud_accepts_plain_ollama_api_key(monkeypatch):
+    """Ollama's own docs tell users to set OLLAMA_API_KEY, so honour it."""
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("OLLAMA_API_KEY", "cloud-key")
+
+    assert llm.detect_backend() == "ollama-cloud"
+    assert llm._get_backend_api_key("ollama-cloud") == "cloud-key"
+
+
+def test_ollama_cloud_not_autodetected_when_ollama_is_local(monkeypatch):
+    """A loopback OLLAMA_BASE_URL means "keep my corpus on this machine".
+
+    Auto-routing to ollama.com on a leftover OLLAMA_API_KEY would ship the whole
+    corpus off-box — silent egress, the F-002 failure mode in reverse.
+    """
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("OLLAMA_API_KEY", "cloud-key")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+
+    assert llm.detect_backend() == "ollama"
+
+
+def test_ollama_cloud_empty_key_is_not_detected(monkeypatch):
+    """An exported-but-empty OLLAMA_API_KEY must not select a backend."""
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("OLLAMA_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+
+    assert llm.detect_backend() == "openai"
+
+
+def test_extract_files_direct_routes_ollama_cloud_through_openai_compat(tmp_path, monkeypatch):
+    _clear_backend_env(monkeypatch)
+    monkeypatch.setenv("OLLAMA_CLOUD_API_KEY", "cloud-key")
+    source = tmp_path / "note.md"
+    source.write_text("# Architecture\n\nThe runner emits a snapshot.\n")
+    result = {"nodes": [], "edges": [], "hyperedges": [], "input_tokens": 1, "output_tokens": 1}
+
+    with patch("graphify.llm._call_openai_compat", return_value=result) as call:
+        assert llm.extract_files_direct([source], backend="ollama-cloud", root=tmp_path) is result
+
+    assert call.call_args.args[:3] == (
+        "https://ollama.com/v1",
+        "cloud-key",
+        "gemma4:cloud",
+    )
+
+
+def test_ollama_cloud_is_free_and_sees_images(monkeypatch):
+    """Plan-covered, so cost estimates stay at $0; gemma4 is multimodal."""
+    _clear_backend_env(monkeypatch)
+    assert llm.estimate_cost("ollama-cloud", 1_000_000, 1_000_000) == 0.0
+    assert llm._backend_supports_vision("ollama-cloud") is True
+
+
+def test_ollama_cloud_skips_local_ollama_special_cases(monkeypatch):
+    """It must not inherit the local-GPU tuning that keys off backend == "ollama".
+
+    GRAPHIFY_OLLAMA_VISION gates vision for the *local* backend only; if
+    ollama-cloud were matched by that check, setting nothing would blind a
+    multimodal hosted model.
+    """
+    _clear_backend_env(monkeypatch)
+    monkeypatch.delenv("GRAPHIFY_OLLAMA_VISION", raising=False)
+    assert llm._backend_supports_vision("ollama") is False
+    assert llm._backend_supports_vision("ollama-cloud") is True
 
 
 def test_openai_backend_detected(monkeypatch):

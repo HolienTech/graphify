@@ -55,35 +55,56 @@ def test_ollama_in_backends():
     assert "max_tokens" in BACKENDS["ollama"]
 
 
+def _clear_backend_keys(monkeypatch):
+    """Clear every key detect_backend() consults.
+
+    These tests used to delenv an ad-hoc subset each, so a key the test did not
+    think to clear (GEMINI_API_KEY, in practice) leaked in from the developer's
+    own shell and failed the suite locally while passing in clean CI.
+    """
+    for env_key in (
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "MOONSHOT_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "OLLAMA_CLOUD_API_KEY",
+        "OLLAMA_API_KEY",
+        "OLLAMA_BASE_URL",
+        "AWS_PROFILE",
+        "AWS_REGION",
+        "AWS_DEFAULT_REGION",
+    ):
+        monkeypatch.delenv(env_key, raising=False)
+
+
 def test_detect_backend_ollama(monkeypatch):
-    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _clear_backend_keys(monkeypatch)
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     assert detect_backend() == "ollama"
 
 
 def test_detect_backend_kimi_beats_ollama(monkeypatch):
+    _clear_backend_keys(monkeypatch)
     monkeypatch.setenv("MOONSHOT_API_KEY", "test-key")
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert detect_backend() == "kimi"
 
 
 def test_detect_backend_claude_beats_ollama(monkeypatch):
     # ANTHROPIC_API_KEY (paid, intentional) should win over OLLAMA_BASE_URL
     # (env-driven, easy to set accidentally) -- security fix F-002/F-029.
-    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    _clear_backend_keys(monkeypatch)
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     assert detect_backend() == "claude"
 
 
 def test_detect_backend_none_without_envvars(monkeypatch):
-    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
-    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _clear_backend_keys(monkeypatch)
     assert detect_backend() is None
 
 

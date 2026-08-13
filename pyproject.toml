@@ -64,6 +64,10 @@ postgres = ["psycopg[binary]"]
 video = ["faster-whisper; python_version >= '3.11'", "yt-dlp>=2026.6.9"]
 kimi = ["openai", "tiktoken"]
 ollama = ["openai"]
+# Ollama Cloud goes through the OpenAI-compatible client and, unlike the local
+# backend, bills against a real context window, so it wants tiktoken for
+# accurate packing rather than the 4-chars-per-token fallback.
+ollama-cloud = ["openai", "tiktoken"]
 bedrock = ["boto3"]
 anthropic = ["anthropic"]
 gemini = ["openai", "tiktoken"]
