@@ -5,6 +5,12 @@ on:
     types: [published]
   workflow_dispatch:
 
+# Concurrency: supersede in-flight runs on branches/PRs; on the default
+# branch (v8) queue instead - a live deploy is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/v8' }}
+
 jobs:
   build-graph:
     runs-on: ubuntu-latest
