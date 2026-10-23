@@ -7,7 +7,7 @@
 # Builds from source so the image includes the Streamable HTTP transport even
 # before it lands on PyPI. The graph.json is mounted at runtime (-v), never
 # baked into the image.
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
 
 WORKDIR /app
 COPY . /app
