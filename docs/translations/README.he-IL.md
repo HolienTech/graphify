@@ -67,7 +67,7 @@ graphify export callflow-html
 
 | דרישה | מינימום | בדיקה | התקנה |
 |---|---|---|---|
-| Python | 3.10+ | `python --version` | [python.org](https://www.python.org/downloads/) |
+| Python | 3.11+ | `python --version` | [python.org](https://www.python.org/downloads/) |
 | uv *(מומלץ)* | כל גרסה | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | pipx *(חלופה)* | כל גרסה | `pipx --version` | `pip install pipx` |
 
