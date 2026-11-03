@@ -9,7 +9,7 @@ description = "AI coding assistant skill (Claude Code, CodeBuddy, Codex, OpenCod
 readme = "README.md"
 license = { file = "LICENSE" }
 keywords = ["claude", "claude-code", "codex", "opencode", "kilo", "cursor", "gemini", "aider", "kiro", "pi", "devin", "knowledge-graph", "rag", "graphrag", "obsidian", "community-detection", "tree-sitter", "leiden", "llm"]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "networkx>=3.4",
     "numpy>=1.21",
@@ -101,7 +101,6 @@ dev = [
     "ruff>=0.15.13",
     "setuptools>=82.0.1",
     "wheel>=0.47.0",
-    "tomli>=2.0 ; python_version < '3.11'",
     "tree-sitter-hcl>=1.2.0",
 ]
 
@@ -135,7 +134,7 @@ skips = ["B404"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # Keep the committed baseline conservative until upstream adopts a broader lint policy.
@@ -143,5 +142,5 @@ select = ["E9", "F63", "F7", "F82"]
 
 [tool.pyright]
 include = ["graphify", "tests"]
-pythonVersion = "3.10"
+pythonVersion = "3.11"
 typeCheckingMode = "basic"

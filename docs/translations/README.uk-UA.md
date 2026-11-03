@@ -52,7 +52,7 @@ graphify export callflow-html
 
 | Вимога | Мінімум | Перевірка | Встановлення |
 |---|---|---|---|
-| Python | 3.10+ | `python --version` | [python.org](https://www.python.org/downloads/) |
+| Python | 3.11+ | `python --version` | [python.org](https://www.python.org/downloads/) |
 | uv *(рекомендовано)* | будь-яка | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | pipx *(альтернатива)* | будь-яка | `pipx --version` | `pip install pipx` |
 
@@ -549,7 +549,7 @@ git clone https://github.com/safishamsi/graphify.git
 cd graphify
 git checkout v8                        # гілка активної розробки
 
-# Створіть віртуальне середовище (потрібен Python 3.10+):
+# Створіть віртуальне середовище (потрібен Python 3.11+):
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\Scripts\activate
 
